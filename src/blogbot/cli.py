@@ -95,5 +95,41 @@ def analyze() -> None:
         typer.echo(f"{angle.priority:>3}  {len(tids):>6}  {angle.title}")
 
 
+@app.command()
+def generate(run_id: str = typer.Option("", help="Run ID (defaults to latest run)")) -> None:
+    """Generate blog post drafts from analyzed angles."""
+    from blogbot.db import get_conn, init_db
+    from blogbot.agents import PipelineHalt
+    from blogbot.agents.generation import run_generation
+    from blogbot.llm.base import LLMError
+    from blogbot.config import MissingSecretError
+
+    config = load_config()
+    secrets = load_secrets()
+    conn = get_conn()
+    init_db(conn)
+
+    if not run_id:
+        row = conn.execute("SELECT id FROM runs ORDER BY started_at DESC LIMIT 1").fetchone()
+        if not row:
+            typer.echo("No runs found. Run: blogbot analyze", err=True)
+            raise typer.Exit(code=1)
+        run_id = row["id"]
+
+    try:
+        draft_ids = run_generation(conn, config, secrets, run_id)
+    except MissingSecretError as e:
+        typer.echo(f"{e}  run: blogbot setup", err=True)
+        raise typer.Exit(code=1)
+    except LLMError as e:
+        typer.echo(f"LLM error: {e}  run: blogbot setup", err=True)
+        raise typer.Exit(code=1)
+    except PipelineHalt as e:
+        typer.echo(f"Pipeline halted: {e}", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(f"Drafts generated: {len(draft_ids)}")
+
+
 if __name__ == "__main__":
     app()
