@@ -99,6 +99,7 @@ class PanelConfig(BaseModel):
 class ComfyUIConfig(BaseModel):
     base_url: str = "http://localhost:8188"
     workflow_file: str = "comfy_workflow.json"
+    checkpoint: str = ""
     width: int = 1200
     height: int = 630
     timeout_seconds: int = 300

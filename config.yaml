@@ -37,6 +37,7 @@ imagery:
   comfyui:
     base_url: "http://localhost:8188"
     workflow_file: "comfy_workflow.json"
+    checkpoint: ""         # user supplies via blogbot setup
     width: 1200
     height: 630
     timeout_seconds: 300

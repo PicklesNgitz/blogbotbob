@@ -167,5 +167,41 @@ def panel(run_id: str = typer.Option("", help="Run ID (defaults to latest run)")
     typer.echo(f"\nSelected: {report.k}")
 
 
+@app.command()
+def imagery(run_id: str = typer.Option("", help="Run ID (defaults to latest run)")) -> None:
+    """Generate header images for selected drafts via ComfyUI."""
+    from blogbot.db import get_conn, init_db, drafts_by_status
+    from blogbot.models import DraftStatus
+    from blogbot.agents import PipelineHalt
+    from blogbot.agents.imagery import run_imagery
+    from blogbot.llm.base import LLMError
+
+    config = load_config()
+    secrets = load_secrets()
+    conn = get_conn()
+    init_db(conn)
+
+    if not run_id:
+        row = conn.execute("SELECT id FROM runs ORDER BY started_at DESC LIMIT 1").fetchone()
+        if not row:
+            typer.echo("No runs found.", err=True)
+            raise typer.Exit(code=1)
+        run_id = row["id"]
+
+    try:
+        run_imagery(conn, config, secrets, run_id)
+    except LLMError as e:
+        typer.echo(f"LLM error: {e}  run: blogbot setup", err=True)
+        raise typer.Exit(code=1)
+    except PipelineHalt as e:
+        typer.echo(f"Pipeline halted: {e}", err=True)
+        raise typer.Exit(code=1)
+
+    ready = drafts_by_status(conn, DraftStatus.image_ready, run_id=run_id)
+    for d in ready:
+        typer.echo(f"  {d.image_path}")
+    typer.echo(f"Images ready: {len(ready)}")
+
+
 if __name__ == "__main__":
     app()
