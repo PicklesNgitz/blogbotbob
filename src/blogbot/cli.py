@@ -60,5 +60,40 @@ def scrape() -> None:
         raise typer.Exit(code=1)
 
 
+@app.command()
+def analyze() -> None:
+    """Synthesize content angles from scraped topics."""
+    from blogbot.db import get_conn, init_db, start_run
+    from blogbot.agents import PipelineHalt
+    from blogbot.agents.analysis import run_analysis
+    from blogbot.llm.base import LLMError
+
+    config = load_config()
+    secrets = load_secrets()
+    conn = get_conn()
+    init_db(conn)
+    run_id = start_run(conn)
+
+    try:
+        angles = run_analysis(conn, config, secrets, run_id)
+    except LLMError as e:
+        msg = str(e)
+        if "is empty" in msg or "not set" in msg:
+            typer.echo(f"Config error: {msg}  run: blogbot setup", err=True)
+        else:
+            typer.echo(f"LLM error: {msg}", err=True)
+        raise typer.Exit(code=1)
+    except PipelineHalt as e:
+        typer.echo(f"Pipeline halted: {e}", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(f"{'Pri':>3}  {'Topics':>6}  Title")
+    typer.echo("-" * 60)
+    for angle in sorted(angles, key=lambda a: a.priority):
+        import json as _json
+        tids = _json.loads(angle.topic_ids)
+        typer.echo(f"{angle.priority:>3}  {len(tids):>6}  {angle.title}")
+
+
 if __name__ == "__main__":
     app()
