@@ -131,5 +131,41 @@ def generate(run_id: str = typer.Option("", help="Run ID (defaults to latest run
     typer.echo(f"Drafts generated: {len(draft_ids)}")
 
 
+@app.command()
+def panel(run_id: str = typer.Option("", help="Run ID (defaults to latest run)")) -> None:
+    """Score drafts with audience persona panel and select top-30%."""
+    from blogbot.db import get_conn, init_db
+    from blogbot.agents import PipelineHalt
+    from blogbot.agents.panel import run_panel
+    from blogbot.llm.base import LLMError
+
+    config = load_config()
+    secrets = load_secrets()
+    conn = get_conn()
+    init_db(conn)
+
+    if not run_id:
+        row = conn.execute("SELECT id FROM runs ORDER BY started_at DESC LIMIT 1").fetchone()
+        if not row:
+            typer.echo("No runs found.", err=True)
+            raise typer.Exit(code=1)
+        run_id = row["id"]
+
+    try:
+        report = run_panel(conn, config, secrets, run_id)
+    except LLMError as e:
+        typer.echo(f"LLM error: {e}  run: blogbot setup", err=True)
+        raise typer.Exit(code=1)
+    except PipelineHalt as e:
+        typer.echo(f"Pipeline halted: {e}", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(f"{'Score':>6}  {'Verdict':<10}  Title")
+    typer.echo("-" * 70)
+    for v in report.verdicts:
+        typer.echo(f"{v.score:>6.1f}  {v.verdict:<10}  {v.title}")
+    typer.echo(f"\nSelected: {report.k}")
+
+
 if __name__ == "__main__":
     app()

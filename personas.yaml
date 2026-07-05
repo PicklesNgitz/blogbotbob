@@ -1,0 +1,11 @@
+personas:
+  - name: skeptical_owner
+    profile: "Owner of a 40-person services firm. Time-poor, burned by tech fads, cares only about cost, risk, and payback period."
+  - name: ops_manager
+    profile: "Operations manager at an SMB. Wants step-by-step practicality, tooling names, and realistic effort estimates."
+  - name: it_generalist
+    profile: "The one IT person at a small company. Technical, allergic to marketing fluff, checks claims for accuracy."
+  - name: marketing_lead
+    profile: "SMB marketing lead. Cares about clarity, story, and whether the post is shareable to a non-technical audience."
+  - name: finance_controller
+    profile: "Controller/CFO type. Judges ROI logic, pricing claims, and whether numbers are credible and sourced."
