@@ -1,0 +1,51 @@
+run:
+  max_publishes_per_run: 2
+  panel_top_fraction: 0.30
+
+sources:
+  rss:
+    enabled: true
+    feeds: []          # user adds feed URLs
+    max_items_per_feed: 20
+  hackernews:
+    enabled: true
+    max_items: 30
+  reddit:
+    enabled: false     # requires creds in .env
+    subreddits: []
+    max_items_per_sub: 20
+  linkedin:
+    enabled: false     # experimental; requires browser automation
+  twitter:
+    enabled: false     # requires paid API creds
+
+llm:
+  ollama:
+    base_url: "http://localhost:11434"
+    model_analysis: ""   # user supplies at ASK USER checkpoint
+    model_panel: ""
+  anthropic:
+    model_draft: "claude-sonnet-4-6"
+    max_tokens_draft: 4096
+
+panel:
+  personas_file: "personas.yaml"
+  scores_per_draft: 5    # one score per persona
+
+imagery:
+  comfyui:
+    base_url: "http://localhost:8188"
+    workflow_file: "comfy_workflow.json"
+    width: 1200
+    height: 630
+    timeout_seconds: 300
+
+wordpress:
+  base_url: ""           # user supplies; e.g. https://example.com
+  default_status: "draft"  # pipeline publishes as WP draft first run; switch to "publish" after verified
+  category: "AI"
+
+drafting:
+  posts_per_run: 6        # drafts generated per run (before panel cull)
+  min_words: 700
+  max_words: 1200
