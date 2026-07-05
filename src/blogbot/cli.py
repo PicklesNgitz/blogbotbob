@@ -381,5 +381,37 @@ def queue_save(draft_id: int = typer.Argument(..., help="Draft ID")) -> None:
     typer.echo(f"Draft {draft_id} updated and still pending approval.")
 
 
+@app.command()
+def publish(run_id: str = typer.Option("", help="Run ID (defaults to all approved drafts)")) -> None:
+    """Publish approved drafts to WordPress."""
+    from blogbot.db import get_conn, init_db, drafts_by_status
+    from blogbot.models import DraftStatus
+    from blogbot.agents import PipelineHalt
+    from blogbot.publish.wordpress import run_publish
+
+    config = load_config()
+    secrets = load_secrets()
+    conn = get_conn()
+    init_db(conn)
+
+    run_id_arg = run_id if run_id else None
+
+    # Check for approved drafts before calling run_publish
+    approved = drafts_by_status(conn, DraftStatus.approved, run_id=run_id_arg)
+    if not approved:
+        typer.echo("Nothing approved to publish.")
+        return
+
+    try:
+        results = run_publish(conn, config, secrets, run_id=run_id_arg)
+    except PipelineHalt as e:
+        typer.echo(f"Pipeline halted: {e}  run: blogbot setup", err=True)
+        raise typer.Exit(code=1)
+
+    for wp_id, wp_url in results:
+        typer.echo(f"published: {wp_url}")
+    typer.echo(f"Total published: {len(results)}")
+
+
 if __name__ == "__main__":
     app()
