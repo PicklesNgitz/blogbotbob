@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Test Feed</title>
+    <link>https://example.com</link>
+    <description>Test RSS feed</description>
+    <item>
+      <title>AI Transforms SMB Operations</title>
+      <link>https://example.com/ai-smb</link>
+      <description>&lt;p&gt;How small businesses are adopting AI tools.&lt;/p&gt;</description>
+    </item>
+    <item>
+      <title>LLM Cost Reduction Strategies</title>
+      <link>https://example.com/llm-costs</link>
+      <description>Reducing LLM costs for small teams.</description>
+    </item>
+  </channel>
+</rss>
