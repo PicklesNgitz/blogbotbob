@@ -1,4 +1,5 @@
 import logging
+import logging.handlers
 from pathlib import Path
 
 import typer
@@ -6,11 +7,25 @@ import typer
 from blogbot.config import load_config, load_secrets
 from blogbot.llm.router import healthcheck as _healthcheck
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+_LOG_FMT = "%(levelname)s %(name)s: %(message)s"
+logging.basicConfig(level=logging.INFO, format=_LOG_FMT)
 
 app = typer.Typer(name="blogbot", help="BlogBotBob — multi-agent blog content pipeline.")
 queue_app = typer.Typer(help="Human approval queue.")
 app.add_typer(queue_app, name="queue")
+
+
+def _setup_file_logging() -> None:
+    log_dir = Path("data")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    fh = logging.handlers.RotatingFileHandler(
+        log_dir / "blogbot.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+    )
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter(_LOG_FMT))
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)  # let file handler see DEBUG; console handler stays INFO
+    root.addHandler(fh)
 
 
 def _get_latest_run_id(conn) -> str:
@@ -411,6 +426,135 @@ def publish(run_id: str = typer.Option("", help="Run ID (defaults to all approve
     for wp_id, wp_url in results:
         typer.echo(f"published: {wp_url}")
     typer.echo(f"Total published: {len(results)}")
+
+
+@app.command()
+def run() -> None:
+    """Run the full pipeline: scrape → analyze → generate → panel → imagery → enqueue."""
+    import traceback
+    from blogbot.db import get_conn, init_db, start_run, finish_run, drafts_by_status, update_draft
+    from blogbot.models import DraftStatus
+    from blogbot.agents import PipelineHalt
+    from blogbot.agents.scraper import run_scraper
+    from blogbot.agents.analysis import run_analysis
+    from blogbot.agents.generation import run_generation
+    from blogbot.agents.panel import run_panel
+    from blogbot.agents.imagery import run_imagery
+    from blogbot.llm.base import LLMError
+    from blogbot.config import MissingSecretError
+
+    _setup_file_logging()
+    config = load_config()
+    secrets = load_secrets()
+    conn = get_conn()
+    init_db(conn)
+    run_id = start_run(conn)
+    logger = logging.getLogger("blogbot.run")
+    logger.info("Run %s started", run_id)
+
+    stage = "init"
+    try:
+        # 1. Scrape
+        stage = "scrape"
+        logger.info("--- scrape ---")
+        scrape_report = run_scraper(conn, config, secrets)
+        enabled = sum([
+            config.sources.rss.enabled, config.sources.hackernews.enabled,
+            config.sources.reddit.enabled, config.sources.linkedin.enabled,
+            config.sources.twitter.enabled,
+        ])
+        if enabled > 0 and len(scrape_report.errors) >= enabled:
+            finish_run(conn, run_id, stage_reached=stage, notes="all sources errored")
+            typer.echo("All enabled sources failed — run: blogbot setup", err=True)
+            raise typer.Exit(code=1)
+
+        # 2. Analyze
+        stage = "analyze"
+        logger.info("--- analyze ---")
+        angles = run_analysis(conn, config, secrets, run_id)
+
+        # 3. Generate
+        stage = "generate"
+        logger.info("--- generate ---")
+        draft_ids = run_generation(conn, config, secrets, run_id)
+
+        # 4. Panel
+        stage = "panel"
+        logger.info("--- panel ---")
+        panel_report = run_panel(conn, config, secrets, run_id)
+
+        # 5. Imagery
+        stage = "imagery"
+        logger.info("--- imagery ---")
+        run_imagery(conn, config, secrets, run_id)
+
+        # 6. Enqueue
+        stage = "enqueue"
+        ready = drafts_by_status(conn, DraftStatus.image_ready, run_id=run_id)
+        for d in ready:
+            update_draft(conn, d.id, status=DraftStatus.pending_approval.value)  # type: ignore[arg-type]
+
+        queued = len(ready)
+        finish_run(conn, run_id, stage_reached="enqueued",
+                   notes=f"angles={len(angles)} drafts={len(draft_ids)} selected={panel_report.k} queued={queued}")
+
+        typer.echo(f"\nRun {run_id} complete.")
+        typer.echo(f"topics: {scrape_report.new_topics} new | angles: {len(angles)} | "
+                   f"drafts: {len(draft_ids)} | selected: {panel_report.k} | queued: {queued}")
+        typer.echo("Next: blogbot queue list")
+
+    except (PipelineHalt, LLMError, MissingSecretError) as e:
+        finish_run(conn, run_id, stage_reached=stage, notes=str(e))
+        typer.echo(f"Pipeline halted at {stage}: {e}  — run: blogbot setup", err=True)
+        raise typer.Exit(code=1)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        finish_run(conn, run_id, stage_reached=stage, notes=str(e))
+        logger.exception("Unexpected error at stage %s", stage)
+        typer.echo(f"Unexpected error at {stage}: {e}", err=True)
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def status() -> None:
+    """Show draft counts by status and last 3 runs."""
+    from blogbot.db import get_conn, init_db
+
+    conn = get_conn()
+    init_db(conn)
+
+    typer.echo("=== Draft status counts ===")
+    rows = conn.execute(
+        "SELECT status, COUNT(*) as n FROM drafts GROUP BY status ORDER BY status"
+    ).fetchall()
+    if not rows:
+        typer.echo("  (no drafts)")
+    else:
+        for row in rows:
+            typer.echo(f"  {row['status']:<20} {row['n']}")
+
+    typer.echo("\n=== Last 3 runs ===")
+    runs = conn.execute(
+        "SELECT id, started_at, finished_at, stage_reached, notes FROM runs "
+        "ORDER BY started_at DESC LIMIT 3"
+    ).fetchall()
+    if not runs:
+        typer.echo("  (no runs)")
+    else:
+        for r in runs:
+            finished = r["finished_at"] or "running"
+            typer.echo(f"  {r['id'][:8]}  started={r['started_at']}  "
+                       f"finished={finished}  stage={r['stage_reached'] or '?'}")
+
+
+@app.command()
+def setup() -> None:
+    """First-run setup wizard — configures sources, LLM backends, ComfyUI, WordPress."""
+    from blogbot.setup_wizard import run_wizard
+
+    _setup_file_logging()
+    run_wizard()
 
 
 if __name__ == "__main__":

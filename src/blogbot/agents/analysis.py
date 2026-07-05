@@ -53,6 +53,7 @@ def run_analysis(
         f"JSON schema:\n{_SCHEMA_HINT}"
     )
 
+    logger.debug("analysis: digest has %d topics, requesting %d angles", len(sorted_topics), n_angles)
     client = get_client(Role.ANALYSIS, config, secrets)
     raw = client.complete_json(_SYSTEM, user_prompt, _SCHEMA_HINT, max_tokens=2048)
 
