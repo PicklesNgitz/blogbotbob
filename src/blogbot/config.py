@@ -52,6 +52,7 @@ class LinkedInSourceConfig(BaseModel):
 
 class TwitterSourceConfig(BaseModel):
     enabled: bool = False
+    query: str = ""
 
     model_config = {"extra": "forbid"}
 
