@@ -1,5 +1,5 @@
-import sys
 import logging
+from pathlib import Path
 
 import typer
 
@@ -9,7 +9,21 @@ from blogbot.llm.router import healthcheck as _healthcheck
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 app = typer.Typer(name="blogbot", help="BlogBotBob — multi-agent blog content pipeline.")
+queue_app = typer.Typer(help="Human approval queue.")
+app.add_typer(queue_app, name="queue")
 
+
+def _get_latest_run_id(conn) -> str:
+    row = conn.execute("SELECT id FROM runs ORDER BY started_at DESC LIMIT 1").fetchone()
+    if not row:
+        typer.echo("No runs found.", err=True)
+        raise typer.Exit(code=1)
+    return row["id"]
+
+
+# ---------------------------------------------------------------------------
+# Top-level commands
+# ---------------------------------------------------------------------------
 
 @app.command()
 def version() -> None:
@@ -53,7 +67,6 @@ def scrape() -> None:
     if enabled_sources == 0:
         typer.echo("No sources enabled. Enable at least one source in config.yaml.", err=True)
         raise typer.Exit(code=1)
-    # Sources that actually attempted a fetch (not just enabled) minus errored ones
     successful_sources = enabled_sources - len(report.errors)
     if successful_sources <= 0 and report.errors:
         typer.echo("All enabled sources failed.", err=True)
@@ -67,6 +80,7 @@ def analyze() -> None:
     from blogbot.agents import PipelineHalt
     from blogbot.agents.analysis import run_analysis
     from blogbot.llm.base import LLMError
+    import json as _json
 
     config = load_config()
     secrets = load_secrets()
@@ -90,7 +104,6 @@ def analyze() -> None:
     typer.echo(f"{'Pri':>3}  {'Topics':>6}  Title")
     typer.echo("-" * 60)
     for angle in sorted(angles, key=lambda a: a.priority):
-        import json as _json
         tids = _json.loads(angle.topic_ids)
         typer.echo(f"{angle.priority:>3}  {len(tids):>6}  {angle.title}")
 
@@ -110,11 +123,7 @@ def generate(run_id: str = typer.Option("", help="Run ID (defaults to latest run
     init_db(conn)
 
     if not run_id:
-        row = conn.execute("SELECT id FROM runs ORDER BY started_at DESC LIMIT 1").fetchone()
-        if not row:
-            typer.echo("No runs found. Run: blogbot analyze", err=True)
-            raise typer.Exit(code=1)
-        run_id = row["id"]
+        run_id = _get_latest_run_id(conn)
 
     try:
         draft_ids = run_generation(conn, config, secrets, run_id)
@@ -145,11 +154,7 @@ def panel(run_id: str = typer.Option("", help="Run ID (defaults to latest run)")
     init_db(conn)
 
     if not run_id:
-        row = conn.execute("SELECT id FROM runs ORDER BY started_at DESC LIMIT 1").fetchone()
-        if not row:
-            typer.echo("No runs found.", err=True)
-            raise typer.Exit(code=1)
-        run_id = row["id"]
+        run_id = _get_latest_run_id(conn)
 
     try:
         report = run_panel(conn, config, secrets, run_id)
@@ -170,7 +175,7 @@ def panel(run_id: str = typer.Option("", help="Run ID (defaults to latest run)")
 @app.command()
 def imagery(run_id: str = typer.Option("", help="Run ID (defaults to latest run)")) -> None:
     """Generate header images for selected drafts via ComfyUI."""
-    from blogbot.db import get_conn, init_db, drafts_by_status
+    from blogbot.db import get_conn, init_db, drafts_by_status, update_draft
     from blogbot.models import DraftStatus
     from blogbot.agents import PipelineHalt
     from blogbot.agents.imagery import run_imagery
@@ -182,11 +187,7 @@ def imagery(run_id: str = typer.Option("", help="Run ID (defaults to latest run)
     init_db(conn)
 
     if not run_id:
-        row = conn.execute("SELECT id FROM runs ORDER BY started_at DESC LIMIT 1").fetchone()
-        if not row:
-            typer.echo("No runs found.", err=True)
-            raise typer.Exit(code=1)
-        run_id = row["id"]
+        run_id = _get_latest_run_id(conn)
 
     try:
         run_imagery(conn, config, secrets, run_id)
@@ -197,10 +198,187 @@ def imagery(run_id: str = typer.Option("", help="Run ID (defaults to latest run)
         typer.echo(f"Pipeline halted: {e}", err=True)
         raise typer.Exit(code=1)
 
+    # Auto-enqueue image_ready → pending_approval
     ready = drafts_by_status(conn, DraftStatus.image_ready, run_id=run_id)
     for d in ready:
-        typer.echo(f"  {d.image_path}")
-    typer.echo(f"Images ready: {len(ready)}")
+        update_draft(conn, d.id, status=DraftStatus.pending_approval.value)  # type: ignore[arg-type]
+        typer.echo(f"  queued: {d.image_path}")
+    typer.echo(f"Images ready, enqueued for approval: {len(ready)}")
+
+
+# ---------------------------------------------------------------------------
+# Queue sub-commands
+# ---------------------------------------------------------------------------
+
+@queue_app.command("list")
+def queue_list() -> None:
+    """List drafts pending human approval."""
+    from blogbot.db import get_conn, init_db, drafts_by_status
+    from blogbot.models import DraftStatus
+
+    conn = get_conn()
+    init_db(conn)
+    drafts = drafts_by_status(conn, DraftStatus.pending_approval)
+    if not drafts:
+        typer.echo("Queue empty.")
+        return
+    typer.echo(f"{'ID':>4}  {'Score':>6}  {'Created':<20}  {'Image':<30}  Title")
+    typer.echo("-" * 100)
+    for d in drafts:
+        score = f"{d.panel_score:.1f}" if d.panel_score is not None else "   —"
+        img = (d.image_path or "")[-28:]
+        typer.echo(f"{d.id:>4}  {score:>6}  {d.created_at:<20}  {img:<30}  {d.title}")
+
+
+@queue_app.command("show")
+def queue_show(draft_id: int = typer.Argument(..., help="Draft ID")) -> None:
+    """Show full markdown and panel votes for a pending draft."""
+    from blogbot.db import get_conn, init_db, get_draft, votes_for_draft
+    from blogbot.models import DraftStatus
+
+    conn = get_conn()
+    init_db(conn)
+    try:
+        draft = get_draft(conn, draft_id)
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1)
+
+    if draft.status != DraftStatus.pending_approval:
+        typer.echo(f"Draft {draft_id} is not pending approval (status: {draft.status.value})", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(f"=== Draft {draft_id}: {draft.title} ===")
+    typer.echo(f"Image: {draft.image_path or 'none'}")
+    typer.echo(f"Score: {draft.panel_score}")
+    typer.echo()
+    typer.echo(draft.markdown)
+    typer.echo()
+    typer.echo("--- Panel votes ---")
+    for vote in votes_for_draft(conn, draft_id):
+        typer.echo(f"  {vote.persona:<20} {vote.score:>4.1f}  {vote.critique[:80]}")
+
+
+@queue_app.command("approve")
+def queue_approve(draft_id: int = typer.Argument(..., help="Draft ID")) -> None:
+    """Approve a pending draft for publishing."""
+    from blogbot.db import get_conn, init_db, get_draft, update_draft
+    from blogbot.models import DraftStatus
+
+    conn = get_conn()
+    init_db(conn)
+    try:
+        draft = get_draft(conn, draft_id)
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1)
+
+    if draft.status != DraftStatus.pending_approval:
+        typer.echo(
+            f"Draft {draft_id} cannot be approved — status is '{draft.status.value}', "
+            "must be 'pending_approval'.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    update_draft(conn, draft_id, status=DraftStatus.approved.value)
+    typer.echo(f"Draft {draft_id} '{draft.title}' approved.")
+
+
+@queue_app.command("reject")
+def queue_reject(
+    draft_id: int = typer.Argument(..., help="Draft ID"),
+    reason: str = typer.Option("", help="Rejection reason"),
+) -> None:
+    """Reject a pending draft."""
+    from blogbot.db import get_conn, init_db, get_draft, update_draft
+    from blogbot.models import DraftStatus
+
+    conn = get_conn()
+    init_db(conn)
+    try:
+        draft = get_draft(conn, draft_id)
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1)
+
+    if draft.status != DraftStatus.pending_approval:
+        typer.echo(
+            f"Draft {draft_id} cannot be rejected — status is '{draft.status.value}'.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    err_msg = f"rejected by user: {reason}" if reason else "rejected by user"
+    update_draft(conn, draft_id, status=DraftStatus.rejected.value, error_message=err_msg)
+    typer.echo(f"Draft {draft_id} '{draft.title}' rejected. Reason: {reason or '(none)'}")
+
+
+@queue_app.command("edit")
+def queue_edit(draft_id: int = typer.Argument(..., help="Draft ID")) -> None:
+    """Dump draft markdown to a temp file for editing."""
+    from blogbot.db import get_conn, init_db, get_draft
+    from blogbot.models import DraftStatus
+
+    conn = get_conn()
+    init_db(conn)
+    try:
+        draft = get_draft(conn, draft_id)
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1)
+
+    if draft.status != DraftStatus.pending_approval:
+        typer.echo(f"Draft {draft_id} is not pending approval (status: {draft.status.value})", err=True)
+        raise typer.Exit(code=1)
+
+    edit_path = Path("data") / f"edit-{draft_id}.md"
+    edit_path.parent.mkdir(parents=True, exist_ok=True)
+    edit_path.write_text(draft.markdown, encoding="utf-8")
+    typer.echo(f"Edit file: {edit_path}")
+    typer.echo(f"When done: blogbot queue save {draft_id}")
+
+
+@queue_app.command("save")
+def queue_save(draft_id: int = typer.Argument(..., help="Draft ID")) -> None:
+    """Save edits from temp file back to the draft."""
+    from blogbot.db import get_conn, init_db, get_draft, update_draft
+    from blogbot.models import DraftStatus
+    import frontmatter as _fm
+
+    conn = get_conn()
+    init_db(conn)
+    try:
+        draft = get_draft(conn, draft_id)
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1)
+
+    if draft.status != DraftStatus.pending_approval:
+        typer.echo(f"Draft {draft_id} is not pending approval (status: {draft.status.value})", err=True)
+        raise typer.Exit(code=1)
+
+    edit_path = Path("data") / f"edit-{draft_id}.md"
+    if not edit_path.exists():
+        typer.echo(f"Edit file not found: {edit_path}. Run: blogbot queue edit {draft_id}", err=True)
+        raise typer.Exit(code=1)
+
+    new_text = edit_path.read_text(encoding="utf-8")
+    try:
+        post = _fm.loads(new_text)
+        missing = [k for k in ("title", "description", "tags") if k not in post.metadata]
+        if missing:
+            typer.echo(f"Frontmatter missing required keys: {missing}", err=True)
+            raise typer.Exit(code=1)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        typer.echo(f"Frontmatter parse error: {e}", err=True)
+        raise typer.Exit(code=1)
+
+    update_draft(conn, draft_id, markdown=new_text, status=DraftStatus.pending_approval.value)
+    edit_path.unlink(missing_ok=True)
+    typer.echo(f"Draft {draft_id} updated and still pending approval.")
 
 
 if __name__ == "__main__":
