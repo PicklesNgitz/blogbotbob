@@ -193,17 +193,14 @@ def save_config(config: Config, path: Path = Path("config.yaml")) -> None:
 def load_secrets(env_path: Path = Path(".env")) -> Secrets:
     """Load .env via dotenv, return Secrets model (all fields optional)."""
     load_dotenv(dotenv_path=env_path, override=False)
-    return Secrets(
-        ANTHROPIC_API_KEY=os.getenv("ANTHROPIC_API_KEY", ""),
-        REDDIT_CLIENT_ID=os.getenv("REDDIT_CLIENT_ID", ""),
-        REDDIT_CLIENT_SECRET=os.getenv("REDDIT_CLIENT_SECRET", ""),
-        REDDIT_USER_AGENT=os.getenv("REDDIT_USER_AGENT", "blogbotbob/0.1"),
-        TWITTER_BEARER_TOKEN=os.getenv("TWITTER_BEARER_TOKEN", ""),
-        LINKEDIN_EMAIL=os.getenv("LINKEDIN_EMAIL", ""),
-        LINKEDIN_PASSWORD=os.getenv("LINKEDIN_PASSWORD", ""),
-        WP_USERNAME=os.getenv("WP_USERNAME", ""),
-        WP_APP_PASSWORD=os.getenv("WP_APP_PASSWORD", ""),
-    )
+    _keys = [
+        "ANTHROPIC_API_KEY", "REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET",
+        "REDDIT_USER_AGENT", "TWITTER_BEARER_TOKEN", "LINKEDIN_EMAIL",
+        "LINKEDIN_PASSWORD", "WP_USERNAME", "WP_APP_PASSWORD",
+    ]
+    _vals = {k: os.getenv(k, "") for k in _keys}
+    _vals["REDDIT_USER_AGENT"] = _vals["REDDIT_USER_AGENT"] or "blogbotbob/0.1"
+    return Secrets(**_vals)
 
 
 def require_secret(name: str, value: str) -> str:

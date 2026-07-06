@@ -9,12 +9,12 @@ from blogbot.config import load_config, save_config, write_env
 
 def test_write_env_creates_from_template(tmp_path):
     example = tmp_path / ".env.example"
-    example.write_text("ANTHROPIC_API_KEY=\nREDDIT_CLIENT_ID=\n")
+    example.write_text("SMTP_HOST=\nDB_PORT=\n")
     env_path = tmp_path / ".env"
-    write_env({"ANTHROPIC_API_KEY": "my-key"}, env_path)
+    write_env({"SMTP_HOST": "mail.example.com"}, env_path)
     content = env_path.read_text()
-    assert "ANTHROPIC_API_KEY=my-key" in content
-    assert "REDDIT_CLIENT_ID=" in content  # other key preserved
+    assert "SMTP_HOST=mail.example.com" in content
+    assert "DB_PORT=" in content  # other key preserved
 
 
 def test_write_env_replaces_only_given_keys(tmp_path):
