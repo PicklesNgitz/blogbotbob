@@ -24,8 +24,13 @@ def _setup_file_logging() -> None:
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(logging.Formatter(_LOG_FMT))
     root = logging.getLogger()
-    root.setLevel(logging.DEBUG)  # let file handler see DEBUG; console handler stays INFO
+    root.setLevel(logging.DEBUG)
+    for h in root.handlers:
+        if h.level == logging.NOTSET:
+            h.setLevel(logging.INFO)
     root.addHandler(fh)
+    for noisy in ("httpcore", "httpx", "urllib3", "praw"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def _get_latest_run_id(conn) -> str:
